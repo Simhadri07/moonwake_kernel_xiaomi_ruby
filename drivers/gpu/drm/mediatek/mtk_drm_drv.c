@@ -3355,7 +3355,6 @@ static struct drm_driver mtk_drm_driver = {
 	.disable_vblank = mtk_drm_crtc_disable_vblank,
 	.get_vblank_timestamp = mtk_crtc_get_vblank_timestamp,
 
-	.atomic_check = mtk_drm_crtc_atomic_check,
 	.gem_free_object_unlocked = mtk_drm_gem_free_object,
 	.gem_vm_ops = &drm_gem_cma_vm_ops,
 	.dumb_create = mtk_drm_gem_dumb_create,

@@ -671,10 +671,6 @@ static int mtk_drm_crtc_enable_vblank(struct drm_device *drm, unsigned int pipe)
 	struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(priv->crtc[pipe]);
 	struct mtk_ddp_comp *comp = mtk_crtc_get_comp(&mtk_crtc->base, 0, 0);
 
-	priv = drm->dev_private;
-        mtk_crtc = to_mtk_crtc(priv->crtc[pipe]);
-        comp = mtk_drm_ddp_comp_for_plane(&mtk_crtc->base, NULL, 0, NULL);
-
 	DDPINFO("%s: Enabling VBlank for CRTC %d\n", __func__, pipe);
 	mtk_crtc->vblank_en = 1;
 
