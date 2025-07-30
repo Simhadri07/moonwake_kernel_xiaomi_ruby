@@ -709,6 +709,8 @@ static void mtk_drm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_st
     struct mtk_drm_private *priv = crtc->dev->dev_private;
     struct mtk_crtc_state *crtc_state = to_mtk_crtc_state(crtc->state);
     int index = drm_crtc_index(crtc);
+    struct drm_display_mode *mode = &crtc->state->mode;
+    int refresh_rate = 60;
 
     DDPINFO("%s: Enabling CRTC %d, active=%d\n", __func__, index, crtc->state->active);
 
@@ -720,6 +722,29 @@ static void mtk_drm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_st
     }
 
     if (index == 64 && !crtc->state->mode.valid) {
+	struct drm_connector *connector;
+	struct drm_connector_list_iter conn_iter;
+	bool found_120hz = false;
+
+	DDPINFO("%s: CRTC 64 mode invalid, checking panel modes\n", __func__);
+
+        drm_connector_list_iter_begin(crtc->dev, &conn_iter);
+        drm_for_each_connector_iter(connector, &conn_iter) {
+            if (connector->state->crtc == crtc) {
+                struct drm_display_mode *preferred_mode = connector->display_info.preferred_mode;
+                if (preferred_mode && preferred_mode->vrefresh >= 120) {
+                    DDPINFO("%s: Setting 120Hz mode for CRTC 64\n", __func__);
+                    drm_mode_copy(mode, preferred_mode);
+                    refresh_rate = 120;
+                    found_120hz = true;
+                    break;
+                }
+            }
+        }
+        drm_connector_list_iter_end(&conn_iter);
+
+
+    if (!found_120hz) {
         DDPPR_ERR("%s: CRTC 64 mode invalid, setting 1080x2400@60Hz\n", __func__);
         struct drm_display_mode *mode = &crtc->state->mode;
         drm_mode_set_config_internal(mode, 1080, 2400, 60);
@@ -731,13 +756,15 @@ static void mtk_drm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_st
         mode->vsync_end = 2400 + 5 + 5;
         mode->vtotal = 2400 + 5 + 5 + 23;
     }
-
+    }
     // Ensure power state is on
     if (!priv->power_state) {
         DDPINFO("%s: Power state off, enabling for CRTC %d\n", __func__, index);
         mtk_drm_top_clk_prepare_enable(crtc->dev);
         priv->power_state = true;
     }
+    DDPINFO("%s: CRTC %d set to %dx%d@%dHz\n", __func__, index, 
+            mode->hdisplay, mode->vdisplay, mode->vrefresh);
 }
 
 static int mtk_drm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
