@@ -189,15 +189,23 @@ static int mtk_drm_wait_blank(struct mtk_drm_crtc *mtk_crtc,
 int mtk_drm_crtc_wait_blank(struct mtk_drm_crtc *mtk_crtc)
 {
 	int ret = 0;
-
-	DDPMSG("%s wait TUI finish\n", __func__);
+	ktime_t start,end;
+	int index = drm_crtc_index(&mtk_crtc->base);
+	DDPMSG("%s wait TUI finish on CRTC %d\n", __func__, index);
+	start = ktime_get();
 	while (mtk_crtc->crtc_blank == true) {
 //		DDP_MUTEX_UNLOCK(&mtk_crtc->blank_lock, __func__, __LINE__);
-		ret |= mtk_drm_wait_blank(mtk_crtc, false, HZ / 5);
-//		DDP_MUTEX_LOCK(&mtk_crtc->blank_lock, __func__, __LINE__);
+		ret |= wait_event_timeout(mtk_crtc->state_wait_queue, 
+						mtk_crtc->crtc_blank == false, HZ / 5);
+		if (ret==0) {
+		    DDPPR_ERR("%s: TUI wait timeout on CRTC %d\n", __func__, index);
+		    break;
+		}
 	}
-	DDPMSG("%s TUI done state=%d\n", __func__,
-		mtk_crtc->crtc_blank);
+//		DDP_MUTEX_LOCK(&mtk_crtc->blank_lock, __func__, __LINE__);
+	end = ktime_get();
+	DDPMSG("%s: TUI done on CRTC %d, state=%d, took %lld ns\n", 
+           __func__, index, mtk_crtc->crtc_blank, ktime_to_ns(ktime_sub(end, start)));
 
 	return ret;
 }
@@ -663,12 +671,20 @@ int mtk_drm_crtc_enable_vblank(struct drm_device *drm, unsigned int pipe)
 	struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(priv->crtc[pipe]);
 	struct mtk_ddp_comp *comp = mtk_crtc_get_comp(&mtk_crtc->base, 0, 0);
 
+	DDPINFO("%s: Enabling VBlank for CRTC %d\n", __func__, pipe);
 	mtk_crtc->vblank_en = 1;
+
+	if (pipe == 64 && !mtk_crtc->vblank_enabled) {
+            DDPINFO("%s: Forcing VBlank enable for CRTC 64\n", __func__);
+            mtk_crtc->vblank_enabled = true;
+            drm_crtc_vblank_on(&mtk_crtc->base);
+        }
 
 	if (!mtk_crtc->enabled) {
 		CRTC_MMP_MARK(pipe, enable_vblank, 0xFFFFFFFF,
 			0xFFFFFFFF);
-		return 0;
+	        DDPINFO("%s: CRTC %d not enabled, skipping idlemgr kick\n", __func__, pipe);
+	return 0;
 	}
 
 	/* We only consider CRTC0 vsync so far, need to modify to DPI, DPTX */
@@ -685,6 +701,100 @@ int mtk_drm_crtc_enable_vblank(struct drm_device *drm, unsigned int pipe)
 			(unsigned long)&mtk_crtc->base);
 
 	return 0;
+}
+
+static void mtk_drm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
+{
+    struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(crtc);
+    struct mtk_drm_private *priv = crtc->dev->dev_private;
+    struct mtk_crtc_state *crtc_state = to_mtk_crtc_state(crtc->state);
+    int index = drm_crtc_index(crtc);
+
+    DDPINFO("%s: Enabling CRTC %d, active=%d\n", __func__, index, crtc->state->active);
+
+    if (index == 64 && !crtc->state->active) {
+        DDPPR_ERR("%s: CRTC 64 not active, forcing enable\n", __func__);
+        crtc->state->active = true;
+        drm_crtc_vblank_on(crtc);
+        mtk_drm_crtc_enable_vblank(crtc->dev, index);
+    }
+
+    if (index == 64 && !crtc->state->mode.valid) {
+        DDPPR_ERR("%s: CRTC 64 mode invalid, setting 1080x2400@60Hz\n", __func__);
+        struct drm_display_mode *mode = &crtc->state->mode;
+        drm_mode_set_config_internal(mode, 1080, 2400, 60);
+        mode->vrefresh = 60;
+        mode->hsync_start = 1080 + 48;
+        mode->hsync_end = 1080 + 48 + 32;
+        mode->htotal = 1080 + 48 + 32 + 80;
+        mode->vsync_start = 2400 + 5;
+        mode->vsync_end = 2400 + 5 + 5;
+        mode->vtotal = 2400 + 5 + 5 + 23;
+    }
+
+    // Ensure power state is on
+    if (!priv->power_state) {
+        DDPINFO("%s: Power state off, enabling for CRTC %d\n", __func__, index);
+        mtk_drm_top_clk_prepare_enable(crtc->dev);
+        priv->power_state = true;
+    }
+}
+
+static int mtk_drm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
+{
+    struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(crtc);
+    int index = drm_crtc_index(crtc);
+
+    DDPINFO("%s: Checking atomic state for CRTC %d\n", __func__, index);
+
+    if (index == 64) {
+        DDPINFO("%s: Allowing plane updates for CRTC 64\n", __func__);
+        // Force plane updates to enable DEVICE composition
+        state->planes_changed = true;
+    }
+    return 0;
+}
+
+static void mtk_drm_crtc_atomic_commit(struct drm_device *drm, struct drm_atomic_state *state)
+{
+    struct mtk_drm_private *private = drm->dev_private;
+    struct drm_crtc_state *crtc_state;
+    struct drm_crtc *crtc;
+    int i;
+
+    DDPINFO("%s: Processing atomic commit\n", __func__);
+
+    for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
+        struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(crtc);
+        int index = drm_crtc_index(crtc);
+
+        DDPINFO("%s: Committing CRTC %d, active=%d\n", __func__, index, crtc_state->active);
+
+        if (index == 64 && !crtc_state->active) {
+            DDPPR_ERR("%s: CRTC 64 not active, forcing enable\n", __func__);
+            crtc_state->active = true;
+            drm_crtc_vblank_on(crtc);
+            mtk_drm_crtc_enable_vblank(drm, index);
+        }
+
+        // Wait for VSync to ensure proper commit timing
+        if (!mtk_drm_helper_get_opt(private->helper_opt, MTK_DRM_OPT_COMMIT_NO_WAIT_VBLANK)) {
+            DDPINFO("%s: Waiting for VSync on CRTC %d\n", __func__, index);
+            int ret = drm_crtc_vblank_wait(drm, index, 1, msecs_to_jiffies(50));
+            if (ret < 0) {
+                DDPPR_ERR("%s: VSync wait failed for CRTC %d, ret=%d\n", __func__, index, ret);
+            } else {
+                DDPINFO("%s: VSync wait successful for CRTC %d\n", __func__, index);
+            }
+        }
+
+        // Commit modeset and plane updates
+        drm_atomic_helper_commit_modeset_enables(drm, state);
+        drm_atomic_helper_commit_planes(drm, state, 0);
+    }
+
+    // Complete commit
+    drm_atomic_helper_commit_tail(state);
 }
 
 static void bl_cmdq_cb(struct cmdq_cb_data data)
