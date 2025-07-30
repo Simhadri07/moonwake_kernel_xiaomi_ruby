@@ -3352,6 +3352,8 @@ static struct drm_driver mtk_drm_driver = {
 
 	/* .get_vblank_counter = drm_vblank_no_hw_counter, */
 	.enable_vblank = mtk_drm_crtc_enable_vblank,
+	.atomic_commit = mtk_drm_crtc_atomic_commit,
+        .atomic_check = mtk_drm_crtc_atomic_check,
 	.disable_vblank = mtk_drm_crtc_disable_vblank,
 	.get_vblank_timestamp = mtk_crtc_get_vblank_timestamp,
 

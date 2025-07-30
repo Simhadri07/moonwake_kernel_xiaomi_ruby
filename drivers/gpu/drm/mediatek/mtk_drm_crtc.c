@@ -671,6 +671,10 @@ int mtk_drm_crtc_enable_vblank(struct drm_device *drm, unsigned int pipe)
 	struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(priv->crtc[pipe]);
 	struct mtk_ddp_comp *comp = mtk_crtc_get_comp(&mtk_crtc->base, 0, 0);
 
+	priv = drm->dev_private;
+        mtk_crtc = to_mtk_crtc(priv->crtc[pipe]);
+        comp = mtk_drm_ddp_comp_for_plane(&mtk_crtc->base, NULL, 0, NULL);
+
 	DDPINFO("%s: Enabling VBlank for CRTC %d\n", __func__, pipe);
 	mtk_crtc->vblank_en = 1;
 
@@ -710,7 +714,10 @@ static void mtk_drm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_st
     struct mtk_crtc_state *crtc_state = to_mtk_crtc_state(crtc->state);
     int index = drm_crtc_index(crtc);
     struct drm_display_mode *mode = &crtc->state->mode;
-    int refresh_rate = 60;
+    struct drm_connector *connector;
+    struct drm_connector_list_iter conn_iter;
+    struct drm_display_mode *best_mode = NULL;
+    int refresh_rate = 0;
 
     DDPINFO("%s: Enabling CRTC %d, active=%d\n", __func__, index, crtc->state->active);
 
@@ -728,35 +735,49 @@ static void mtk_drm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_st
 
 	DDPINFO("%s: CRTC 64 mode invalid, checking panel modes\n", __func__);
 
+        // Iterate connectors to find highest refresh rate up to 120Hz
         drm_connector_list_iter_begin(crtc->dev, &conn_iter);
         drm_for_each_connector_iter(connector, &conn_iter) {
-            if (connector->state->crtc == crtc) {
-                struct drm_display_mode *preferred_mode = connector->display_info.preferred_mode;
-                if (preferred_mode && preferred_mode->vrefresh >= 120) {
-                    DDPINFO("%s: Setting 120Hz mode for CRTC 64\n", __func__);
-                    drm_mode_copy(mode, preferred_mode);
-                    refresh_rate = 120;
-                    found_120hz = true;
-                    break;
+            if (connector->state && connector->state->crtc == crtc) {
+                struct drm_display_mode *m;
+                list_for_each_entry(m, &connector->modes, head) {
+                    if (m->vrefresh <= 120 && m->vrefresh > max_refresh &&
+                        m->hdisplay == 1080 && m->vdisplay == 2400) {
+                        best_mode = m;
+                        max_refresh = m->vrefresh;
+                        found_valid_mode = true;
+                    }
                 }
             }
         }
         drm_connector_list_iter_end(&conn_iter);
 
+        if (found_valid_mode && best_mode) {
+            DDPINFO("%s: Setting %dHz mode for CRTC 64\n", __func__, max_refresh);
+            mode->hdisplay = best_mode->hdisplay;
+            mode->vdisplay = best_mode->vdisplay;
+            mode->vrefresh = best_mode->vrefresh;
+            mode->hsync_start = best_mode->hsync_start;
+            mode->hsync_end = best_mode->hsync_end;
+            mode->htotal = best_mode->htotal;
+            mode->vsync_start = best_mode->vsync_start;
+            mode->vsync_end = best_mode->vsync_end;
+            mode->vtotal = best_mode->vtotal;
+        } else {
+            // Fallback to 1080x2400@60Hz
+            DDPPR_ERR("%s: No valid mode found, setting 1080x2400@60Hz\n", __func__);
+            mode->hdisplay = 1080;
+            mode->vdisplay = 2400;
+            mode->vrefresh = 60;
+            mode->hsync_start = 1080 + 48;
+            mode->hsync_end = 1080 + 48 + 32;
+            mode->htotal = 1080 + 48 + 32 + 80;
+            mode->vsync_start = 2400 + 5;
+            mode->vsync_end = 2400 + 5 + 5;
+            mode->vtotal = 2400 + 5 + 5 + 23;
+        }
+    }
 
-    if (!found_120hz) {
-        DDPPR_ERR("%s: CRTC 64 mode invalid, setting 1080x2400@60Hz\n", __func__);
-        struct drm_display_mode *mode = &crtc->state->mode;
-        drm_mode_set_config_internal(mode, 1080, 2400, 60);
-        mode->vrefresh = 60;
-        mode->hsync_start = 1080 + 48;
-        mode->hsync_end = 1080 + 48 + 32;
-        mode->htotal = 1080 + 48 + 32 + 80;
-        mode->vsync_start = 2400 + 5;
-        mode->vsync_end = 2400 + 5 + 5;
-        mode->vtotal = 2400 + 5 + 5 + 23;
-    }
-    }
     // Ensure power state is on
     if (!priv->power_state) {
         DDPINFO("%s: Power state off, enabling for CRTC %d\n", __func__, index);
