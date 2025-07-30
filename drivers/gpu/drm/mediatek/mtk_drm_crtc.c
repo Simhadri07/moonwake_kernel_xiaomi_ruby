@@ -665,7 +665,7 @@ static int mtk_crtc_enable_vblank_thread(void *data)
 	return 0;
 }
 
-int mtk_drm_crtc_enable_vblank(struct drm_device *drm, unsigned int pipe)
+static int mtk_drm_crtc_enable_vblank(struct drm_device *drm, unsigned int pipe)
 {
 	struct mtk_drm_private *priv = drm->dev_private;
 	struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(priv->crtc[pipe]);
@@ -717,7 +717,8 @@ static void mtk_drm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_st
     struct drm_connector *connector;
     struct drm_connector_list_iter conn_iter;
     struct drm_display_mode *best_mode = NULL;
-    int refresh_rate = 0;
+    int max_refresh = 0;
+    bool found_valid_mode = false;
 
     DDPINFO("%s: Enabling CRTC %d, active=%d\n", __func__, index, crtc->state->active);
 
@@ -728,12 +729,8 @@ static void mtk_drm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_st
         mtk_drm_crtc_enable_vblank(crtc->dev, index);
     }
 
-    if (index == 64 && !crtc->state->mode.valid) {
-	struct drm_connector *connector;
-	struct drm_connector_list_iter conn_iter;
-	bool found_120hz = false;
-
-	DDPINFO("%s: CRTC 64 mode invalid, checking panel modes\n", __func__);
+    if (index == 64 && (mode->hdisplay == 0 || mode->vdisplay == 0)) {
+	DDPINFO("%s: CRTC 64 mode invalid, searching panel modes\n", __func__);
 
         // Iterate connectors to find highest refresh rate up to 120Hz
         drm_connector_list_iter_begin(crtc->dev, &conn_iter);
@@ -790,7 +787,6 @@ static void mtk_drm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_st
 
 static int mtk_drm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
 {
-    struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(crtc);
     int index = drm_crtc_index(crtc);
 
     DDPINFO("%s: Checking atomic state for CRTC %d\n", __func__, index);
@@ -825,24 +821,18 @@ static void mtk_drm_crtc_atomic_commit(struct drm_device *drm, struct drm_atomic
             mtk_drm_crtc_enable_vblank(drm, index);
         }
 
-        // Wait for VSync to ensure proper commit timing
         if (!mtk_drm_helper_get_opt(private->helper_opt, MTK_DRM_OPT_COMMIT_NO_WAIT_VBLANK)) {
             DDPINFO("%s: Waiting for VSync on CRTC %d\n", __func__, index);
-            int ret = drm_crtc_vblank_wait(drm, index, 1, msecs_to_jiffies(50));
-            if (ret < 0) {
-                DDPPR_ERR("%s: VSync wait failed for CRTC %d, ret=%d\n", __func__, index, ret);
-            } else {
-                DDPINFO("%s: VSync wait successful for CRTC %d\n", __func__, index);
-            }
+            drm_atomic_helper_wait_for_vblanks(drm, state);
         }
 
         // Commit modeset and plane updates
         drm_atomic_helper_commit_modeset_enables(drm, state);
         drm_atomic_helper_commit_planes(drm, state, 0);
-    }
 
-    // Complete commit
-    drm_atomic_helper_commit_tail(state);
+        // Complete commit
+        drm_atomic_helper_commit_tail(state);
+        drm_atomic_state_put(state);
 }
 
 static void bl_cmdq_cb(struct cmdq_cb_data data)

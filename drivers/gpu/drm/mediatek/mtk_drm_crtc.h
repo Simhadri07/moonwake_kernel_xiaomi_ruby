@@ -899,6 +899,7 @@ char *mtk_crtc_index_spy(int crtc_index);
 bool mtk_drm_get_hdr_property(void);
 int mtk_drm_aod_setbacklight(struct drm_crtc *crtc, unsigned int level);
 
+int mtk_drm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state);
 int mtk_drm_crtc_wait_blank(struct mtk_drm_crtc *mtk_crtc);
 void mtk_drm_crtc_init_para(struct drm_crtc *crtc);
 void mtk_drm_layer_dispatch_to_dual_pipe(
