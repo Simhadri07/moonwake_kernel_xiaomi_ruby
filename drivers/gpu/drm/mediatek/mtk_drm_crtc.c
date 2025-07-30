@@ -10,6 +10,7 @@
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_plane_helper.h>
 #include <drm/drm_fourcc.h>
+#include <drm/drm_property.h>
 #include <linux/clk.h>
 #include <linux/pm_runtime.h>
 #include <linux/soc/mediatek/mtk-cmdq.h>
@@ -66,6 +67,9 @@
 #include "mtk_fbconfig_kdebug.h"
 #include "mtk_layering_rule_base.h"
 
+
+static struct drm_property *prop_msync2_enable;
+static struct drm_property *prop_skip_config;
 static struct mtk_drm_property mtk_crtc_property[CRTC_PROP_MAX] = {
 	{DRM_MODE_PROP_ATOMIC, "OVERLAP_LAYER_NUM", 0, UINT_MAX, 0},
 	{DRM_MODE_PROP_ATOMIC, "LAYERING_IDX", 0, UINT_MAX, 0},
@@ -7634,6 +7638,15 @@ int mtk_drm_crtc_create(struct drm_device *drm_dev,
 #endif
 	DDPMSG("%s-CRTC%d create successfully\n", __func__,
 		priv->num_pipes - 1);
+
+	prop_msync2_enable = drm_property_create(drm_dev, DRM_MODE_PROP_IMMUTABLE, "MSYNC2_0_ENABLE", 0);
+	if (prop_msync2_enable)
+    	    drm_object_attach_property(&mtk_crtc->base.base, prop_msync2_enable, 0);
+
+	// Register SKIP_CONFIG as boolean property
+	prop_skip_config = drm_property_create(drm_dev, DRM_MODE_PROP_IMMUTABLE, "SKIP_CONFIG", 0);
+	if (prop_skip_config)
+    	    drm_object_attach_property(&mtk_crtc->base.base, prop_skip_config, 0);
 
 	return 0;
 }
