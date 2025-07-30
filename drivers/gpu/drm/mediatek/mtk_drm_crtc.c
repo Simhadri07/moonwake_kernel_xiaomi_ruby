@@ -67,6 +67,9 @@
 #include "mtk_fbconfig_kdebug.h"
 #include "mtk_layering_rule_base.h"
 
+/* Forward declarations */
+static void mtk_drm_crtc_wk_lock(struct drm_crtc *crtc, bool get,
+	const char *func, int line);
 
 static struct drm_property *prop_msync2_enable;
 static struct drm_property *prop_skip_config;
@@ -175,7 +178,7 @@ static void mtk_drm_crtc_reset(struct drm_crtc *crtc)
 	state->base.crtc = crtc;
 }
 
-static int mtk_drm_wait_blank(struct mtk_drm_crtc *mtk_crtc,
+static int __maybe_unused mtk_drm_wait_blank(struct mtk_drm_crtc *mtk_crtc,
 	bool blank, long timeout)
 {
 	int ret;
@@ -665,7 +668,7 @@ static int mtk_crtc_enable_vblank_thread(void *data)
 	return 0;
 }
 
-static int mtk_drm_crtc_enable_vblank(struct drm_device *drm, unsigned int pipe)
+int mtk_drm_crtc_enable_vblank(struct drm_device *drm, unsigned int pipe)
 {
 	struct mtk_drm_private *priv = drm->dev_private;
 	struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(priv->crtc[pipe]);
@@ -674,9 +677,8 @@ static int mtk_drm_crtc_enable_vblank(struct drm_device *drm, unsigned int pipe)
 	DDPINFO("%s: Enabling VBlank for CRTC %d\n", __func__, pipe);
 	mtk_crtc->vblank_en = 1;
 
-	if (pipe == 64 && !mtk_crtc->vblank_enabled) {
+	if (pipe == 64) {
             DDPINFO("%s: Forcing VBlank enable for CRTC 64\n", __func__);
-            mtk_crtc->vblank_enabled = true;
             drm_crtc_vblank_on(&mtk_crtc->base);
         }
 
@@ -703,11 +705,9 @@ static int mtk_drm_crtc_enable_vblank(struct drm_device *drm, unsigned int pipe)
 	return 0;
 }
 
-static void mtk_drm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
+static void __maybe_unused mtk_drm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 {
-    struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(crtc);
     struct mtk_drm_private *priv = crtc->dev->dev_private;
-    struct mtk_crtc_state *crtc_state = to_mtk_crtc_state(crtc->state);
     int index = drm_crtc_index(crtc);
     struct drm_display_mode *mode = &crtc->state->mode;
     struct drm_connector *connector;
@@ -781,7 +781,7 @@ static void mtk_drm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_st
             mode->hdisplay, mode->vdisplay, mode->vrefresh);
 }
 
-static int mtk_drm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
+int mtk_drm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
 {
     int index = drm_crtc_index(crtc);
 
@@ -795,7 +795,7 @@ static int mtk_drm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_stat
     return 0;
 }
 
-static void mtk_drm_crtc_atomic_commit(struct drm_device *drm, struct drm_atomic_state *state)
+static void __maybe_unused mtk_drm_crtc_atomic_commit(struct drm_device *drm, struct drm_atomic_state *state)
 {
     struct mtk_drm_private *private = drm->dev_private;
     struct drm_crtc_state *crtc_state;
@@ -805,7 +805,6 @@ static void mtk_drm_crtc_atomic_commit(struct drm_device *drm, struct drm_atomic
     DDPINFO("%s: Processing atomic commit\n", __func__);
 
     for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
-        struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(crtc);
         int index = drm_crtc_index(crtc);
 
         DDPINFO("%s: Committing CRTC %d, active=%d\n", __func__, index, crtc_state->active);
@@ -829,6 +828,7 @@ static void mtk_drm_crtc_atomic_commit(struct drm_device *drm, struct drm_atomic
         // Complete commit
         drm_atomic_helper_commit_tail(state);
         drm_atomic_state_put(state);
+    }
 }
 
 static void bl_cmdq_cb(struct cmdq_cb_data data)
@@ -1029,9 +1029,6 @@ int mtk_drm_setbacklight_grp(struct drm_crtc *crtc, unsigned int level)
 
 	return 0;
 }
-
-static void mtk_drm_crtc_wk_lock(struct drm_crtc *crtc, bool get,
-	const char *func, int line);
 
 int mtk_drm_aod_setbacklight(struct drm_crtc *crtc, unsigned int level)
 {
