@@ -1260,6 +1260,7 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 
 	down_read(&uts_sem);
 	memcpy(&tmp, utsname(), sizeof(tmp));
+
 #if 0
 	if (current_uid().val == 0 && 
 		(!strncmp(current->comm, "bpfloader", 9) ||

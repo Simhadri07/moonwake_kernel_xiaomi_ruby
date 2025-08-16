@@ -10,6 +10,7 @@
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_plane_helper.h>
 #include <drm/drm_fourcc.h>
+#include <drm/drm_property.h>
 #include <linux/clk.h>
 #include <linux/pm_runtime.h>
 #include <linux/soc/mediatek/mtk-cmdq.h>
@@ -66,6 +67,12 @@
 #include "mtk_fbconfig_kdebug.h"
 #include "mtk_layering_rule_base.h"
 
+/* Forward declarations */
+static void mtk_drm_crtc_wk_lock(struct drm_crtc *crtc, bool get,
+	const char *func, int line);
+
+static struct drm_property *prop_msync2_enable;
+static struct drm_property *prop_skip_config;
 static struct mtk_drm_property mtk_crtc_property[CRTC_PROP_MAX] = {
 	{DRM_MODE_PROP_ATOMIC, "OVERLAP_LAYER_NUM", 0, UINT_MAX, 0},
 	{DRM_MODE_PROP_ATOMIC, "LAYERING_IDX", 0, UINT_MAX, 0},
@@ -171,7 +178,7 @@ static void mtk_drm_crtc_reset(struct drm_crtc *crtc)
 	state->base.crtc = crtc;
 }
 
-static int mtk_drm_wait_blank(struct mtk_drm_crtc *mtk_crtc,
+static int __maybe_unused mtk_drm_wait_blank(struct mtk_drm_crtc *mtk_crtc,
 	bool blank, long timeout)
 {
 	int ret;
@@ -185,15 +192,23 @@ static int mtk_drm_wait_blank(struct mtk_drm_crtc *mtk_crtc,
 int mtk_drm_crtc_wait_blank(struct mtk_drm_crtc *mtk_crtc)
 {
 	int ret = 0;
-
-	DDPMSG("%s wait TUI finish\n", __func__);
+	ktime_t start,end;
+	int index = drm_crtc_index(&mtk_crtc->base);
+	DDPMSG("%s wait TUI finish on CRTC %d\n", __func__, index);
+	start = ktime_get();
 	while (mtk_crtc->crtc_blank == true) {
 //		DDP_MUTEX_UNLOCK(&mtk_crtc->blank_lock, __func__, __LINE__);
-		ret |= mtk_drm_wait_blank(mtk_crtc, false, HZ / 5);
-//		DDP_MUTEX_LOCK(&mtk_crtc->blank_lock, __func__, __LINE__);
+		ret |= wait_event_timeout(mtk_crtc->state_wait_queue, 
+						mtk_crtc->crtc_blank == false, HZ / 5);
+		if (ret==0) {
+		    DDPPR_ERR("%s: TUI wait timeout on CRTC %d\n", __func__, index);
+		    break;
+		}
 	}
-	DDPMSG("%s TUI done state=%d\n", __func__,
-		mtk_crtc->crtc_blank);
+//		DDP_MUTEX_LOCK(&mtk_crtc->blank_lock, __func__, __LINE__);
+	end = ktime_get();
+	DDPMSG("%s: TUI done on CRTC %d, state=%d, took %lld ns\n", 
+           __func__, index, mtk_crtc->crtc_blank, ktime_to_ns(ktime_sub(end, start)));
 
 	return ret;
 }
@@ -659,12 +674,19 @@ int mtk_drm_crtc_enable_vblank(struct drm_device *drm, unsigned int pipe)
 	struct mtk_drm_crtc *mtk_crtc = to_mtk_crtc(priv->crtc[pipe]);
 	struct mtk_ddp_comp *comp = mtk_crtc_get_comp(&mtk_crtc->base, 0, 0);
 
+	DDPINFO("%s: Enabling VBlank for CRTC %d\n", __func__, pipe);
 	mtk_crtc->vblank_en = 1;
+
+	if (pipe == 64) {
+            DDPINFO("%s: Forcing VBlank enable for CRTC 64\n", __func__);
+            drm_crtc_vblank_on(&mtk_crtc->base);
+        }
 
 	if (!mtk_crtc->enabled) {
 		CRTC_MMP_MARK(pipe, enable_vblank, 0xFFFFFFFF,
 			0xFFFFFFFF);
-		return 0;
+	        DDPINFO("%s: CRTC %d not enabled, skipping idlemgr kick\n", __func__, pipe);
+	return 0;
 	}
 
 	/* We only consider CRTC0 vsync so far, need to modify to DPI, DPTX */
@@ -681,6 +703,132 @@ int mtk_drm_crtc_enable_vblank(struct drm_device *drm, unsigned int pipe)
 			(unsigned long)&mtk_crtc->base);
 
 	return 0;
+}
+
+static void __maybe_unused mtk_drm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
+{
+    struct mtk_drm_private *priv = crtc->dev->dev_private;
+    int index = drm_crtc_index(crtc);
+    struct drm_display_mode *mode = &crtc->state->mode;
+    struct drm_connector *connector;
+    struct drm_connector_list_iter conn_iter;
+    struct drm_display_mode *best_mode = NULL;
+    int max_refresh = 0;
+    bool found_valid_mode = false;
+
+    DDPINFO("%s: Enabling CRTC %d, active=%d\n", __func__, index, crtc->state->active);
+
+    if (index == 64 && !crtc->state->active) {
+        DDPPR_ERR("%s: CRTC 64 not active, forcing enable\n", __func__);
+        crtc->state->active = true;
+        drm_crtc_vblank_on(crtc);
+        mtk_drm_crtc_enable_vblank(crtc->dev, index);
+    }
+
+    if (index == 64 && (mode->hdisplay == 0 || mode->vdisplay == 0)) {
+	DDPINFO("%s: CRTC 64 mode invalid, searching panel modes\n", __func__);
+
+        // Iterate connectors to find highest refresh rate up to 120Hz
+        drm_connector_list_iter_begin(crtc->dev, &conn_iter);
+        drm_for_each_connector_iter(connector, &conn_iter) {
+            if (connector->state && connector->state->crtc == crtc) {
+                struct drm_display_mode *m;
+                list_for_each_entry(m, &connector->modes, head) {
+                    if (m->vrefresh <= 120 && m->vrefresh > max_refresh &&
+                        m->hdisplay == 1080 && m->vdisplay == 2400) {
+                        best_mode = m;
+                        max_refresh = m->vrefresh;
+                        found_valid_mode = true;
+                    }
+                }
+            }
+        }
+        drm_connector_list_iter_end(&conn_iter);
+
+        if (found_valid_mode && best_mode) {
+            DDPINFO("%s: Setting %dHz mode for CRTC 64\n", __func__, max_refresh);
+            mode->hdisplay = best_mode->hdisplay;
+            mode->vdisplay = best_mode->vdisplay;
+            mode->vrefresh = best_mode->vrefresh;
+            mode->hsync_start = best_mode->hsync_start;
+            mode->hsync_end = best_mode->hsync_end;
+            mode->htotal = best_mode->htotal;
+            mode->vsync_start = best_mode->vsync_start;
+            mode->vsync_end = best_mode->vsync_end;
+            mode->vtotal = best_mode->vtotal;
+        } else {
+            // Fallback to 1080x2400@60Hz
+            DDPPR_ERR("%s: No valid mode found, setting 1080x2400@60Hz\n", __func__);
+            mode->hdisplay = 1080;
+            mode->vdisplay = 2400;
+            mode->vrefresh = 60;
+            mode->hsync_start = 1080 + 48;
+            mode->hsync_end = 1080 + 48 + 32;
+            mode->htotal = 1080 + 48 + 32 + 80;
+            mode->vsync_start = 2400 + 5;
+            mode->vsync_end = 2400 + 5 + 5;
+            mode->vtotal = 2400 + 5 + 5 + 23;
+        }
+    }
+
+    // Ensure power state is on
+    if (!priv->power_state) {
+        DDPINFO("%s: Power state off, enabling for CRTC %d\n", __func__, index);
+        mtk_drm_top_clk_prepare_enable(crtc->dev);
+        priv->power_state = true;
+    }
+    DDPINFO("%s: CRTC %d set to %dx%d@%dHz\n", __func__, index, 
+            mode->hdisplay, mode->vdisplay, mode->vrefresh);
+}
+
+int mtk_drm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
+{
+    int index = drm_crtc_index(crtc);
+
+    DDPINFO("%s: Checking atomic state for CRTC %d\n", __func__, index);
+
+    if (index == 64) {
+        DDPINFO("%s: Allowing plane updates for CRTC 64\n", __func__);
+        // Force plane updates to enable DEVICE composition
+        state->planes_changed = true;
+    }
+    return 0;
+}
+
+static void __maybe_unused mtk_drm_crtc_atomic_commit(struct drm_device *drm, struct drm_atomic_state *state)
+{
+    struct mtk_drm_private *private = drm->dev_private;
+    struct drm_crtc_state *crtc_state;
+    struct drm_crtc *crtc;
+    int i;
+
+    DDPINFO("%s: Processing atomic commit\n", __func__);
+
+    for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
+        int index = drm_crtc_index(crtc);
+
+        DDPINFO("%s: Committing CRTC %d, active=%d\n", __func__, index, crtc_state->active);
+
+        if (index == 64 && !crtc_state->active) {
+            DDPPR_ERR("%s: CRTC 64 not active, forcing enable\n", __func__);
+            crtc_state->active = true;
+            drm_crtc_vblank_on(crtc);
+            mtk_drm_crtc_enable_vblank(drm, index);
+        }
+
+        if (!mtk_drm_helper_get_opt(private->helper_opt, MTK_DRM_OPT_COMMIT_NO_WAIT_VBLANK)) {
+            DDPINFO("%s: Waiting for VSync on CRTC %d\n", __func__, index);
+            drm_atomic_helper_wait_for_vblanks(drm, state);
+        }
+
+        // Commit modeset and plane updates
+        drm_atomic_helper_commit_modeset_enables(drm, state);
+        drm_atomic_helper_commit_planes(drm, state, 0);
+
+        // Complete commit
+        drm_atomic_helper_commit_tail(state);
+        drm_atomic_state_put(state);
+    }
 }
 
 static void bl_cmdq_cb(struct cmdq_cb_data data)
@@ -881,9 +1029,6 @@ int mtk_drm_setbacklight_grp(struct drm_crtc *crtc, unsigned int level)
 
 	return 0;
 }
-
-static void mtk_drm_crtc_wk_lock(struct drm_crtc *crtc, bool get,
-	const char *func, int line);
 
 int mtk_drm_aod_setbacklight(struct drm_crtc *crtc, unsigned int level)
 {
@@ -7634,6 +7779,15 @@ int mtk_drm_crtc_create(struct drm_device *drm_dev,
 #endif
 	DDPMSG("%s-CRTC%d create successfully\n", __func__,
 		priv->num_pipes - 1);
+
+	prop_msync2_enable = drm_property_create(drm_dev, DRM_MODE_PROP_IMMUTABLE, "MSYNC2_0_ENABLE", 0);
+	if (prop_msync2_enable)
+    	    drm_object_attach_property(&mtk_crtc->base.base, prop_msync2_enable, 0);
+
+	// Register SKIP_CONFIG as boolean property
+	prop_skip_config = drm_property_create(drm_dev, DRM_MODE_PROP_IMMUTABLE, "SKIP_CONFIG", 0);
+	if (prop_skip_config)
+    	    drm_object_attach_property(&mtk_crtc->base.base, prop_skip_config, 0);
 
 	return 0;
 }
