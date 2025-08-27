@@ -31,8 +31,9 @@ If you don't know how to flash, [click here](https://t.me/rainy_land_releases/56
 ### Option 2: Kernel Player (For advanced user that build android kernel before)
 
 Since you (Kernel Player) know how to build, pack AK3 and flash it, I just have some notes for you
-- Compile it with only google `clang-r530567 (19)`, `clang-r498229b (17.0.4)` or `clang-r487747c (17.0.4)`. Clang 18, 20, 21 or older have some issues with ln8000 driver with make CN and IN variant can't boot
+- Compile it with only google `clang-r530567 (19)`, `clang-r498229b (17.0.4)` or `clang-r487747c (17.0.2)`. Clang 18, 20, 21 or older have some issues with ln8000 driver with make CN and IN variant can't boot
 - This source use BBR3 by default, it's works well, but if you don't want BBR3, please disable it in `arch/arm64/configs/ruby_defconfig`
 - To add KSU config, please use `make $your_args_here kernelsu.config` after using `make $your_args_here ruby_defconfig`
 - Recommended using `-O2` only, `-Ofast` and `-O3` will cause some stability problems
+
 - Wireguard may have some issues or unused, you can disable it in `arch/arm64/configs/ruby_defconfig`
