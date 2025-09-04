@@ -2182,7 +2182,7 @@ static int ln8000_probe(struct i2c_client *client, const struct i2c_device_id *i
 		ln_info("don't support isr(irq=%d)\n", info->client->irq);
 	}
 #endif
-	device_init_wakeup(info->dev, 1);
+	device_init_wakeup(&client->dev, 1);
 
 	/* charger class register */
 	ret = ln8000_register_charger(info, fake_work_mode);
