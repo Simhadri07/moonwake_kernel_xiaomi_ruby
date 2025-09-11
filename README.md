@@ -26,7 +26,7 @@ Redmi Note 12 pro 5G (ruby) kernel specify for powersave
 7. Click `Run workflow` green button and wait
 8. Download, extract the build and flash!
 
-If you don't know how to flash, [click here](https://t.me/rainy_land_releases/56) (skip step 1 because you already have anykernel build and you know how to push it into your phone)
+If you don't know how to flash, join <https://t.me/deepinrain_playground> and type `#flash_aosp` or `#flash_miui_hyperos` (for workflow build, please extract it first)
 
 ### Option 2: Kernel Player (For advanced user that build android kernel before)
 
@@ -37,3 +37,4 @@ Since you (Kernel Player) know how to build, pack AK3 and flash it, I just have 
 - Recommended using `-O2` only, `-Ofast` and `-O3` will cause some stability problems
 
 - Wireguard may have some issues or unused, you can disable it in `arch/arm64/configs/ruby_defconfig`
+
