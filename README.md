@@ -26,14 +26,12 @@ Redmi Note 12 pro 5G (ruby) kernel specify for powersave
 7. Click `Run workflow` green button and wait
 8. Download, extract the build and flash!
 
-If you don't know how to flash, [click here](https://t.me/rainy_land_releases/56) (skip step 1 because you already have anykernel build and you know how to push it into your phone)
+If you don't know how to flash, join <https://t.me/deepinrain_playground> and type `#flash_aosp` or `#flash_miui_hyperos` (for workflow build, please extract it first)
 
 ### Option 2: Kernel Player (For advanced user that build android kernel before)
 
 Since you (Kernel Player) know how to build, pack AK3 and flash it, I just have some notes for you
 - Compile it with only google `clang-r530567 (19)`, `clang-r498229b (17.0.4)` or `clang-r487747c (17.0.2)`. Clang 18, 20, 21 or older have some issues with ln8000 driver with make CN and IN variant can't boot
-- This source use BBR3 by default, it's works well, but if you don't want BBR3, please disable it in `arch/arm64/configs/ruby_defconfig`
-- To add KSU config, please use `make $your_args_here kernelsu.config` after using `make $your_args_here ruby_defconfig`
+- To add a feature config (eg: features/kernelsu.config), please check `arch/arm64/configs/features`, see what config you want to add and then use `make $your_args_here features/example.config` after using `make $your_args_here ruby_defconfig`
 - Recommended using `-O2` only, `-Ofast` and `-O3` will cause some stability problems
 
-- Wireguard may have some issues or unused, you can disable it in `arch/arm64/configs/ruby_defconfig`
