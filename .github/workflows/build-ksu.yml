@@ -1,0 +1,93 @@
+name: Build MoonWake Ruby Kernel (with KSU)
+
+on:
+  workflow_dispatch:   # allows manual trigger from Actions tab
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v3
+
+      - name: Setup environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git bc bison flex build-essential \
+            libssl-dev libncurses-dev ccache zip unzip curl wget
+
+      - name: Download Google clang r530567
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/clang
+          cd $GITHUB_WORKSPACE/clang
+          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/r530567/clang-r530567.tar.gz -O clang.tar.gz || true
+          if [ -f clang.tar.gz ]; then
+            tar -xzf clang.tar.gz
+          else
+            echo "⚠️ Could not fetch prebuilt clang. Falling back to system clang."
+            sudo apt-get install -y clang
+          fi
+
+      - name: Configure kernel (ruby_defconfig + kernelsu)
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          export CC=clang
+          export LLVM=1
+          export DEFCONFIG=ruby_defconfig
+          mkdir -p out
+          make O=out $DEFCONFIG
+          if [ -f arch/arm64/configs/features/kernelsu.config ]; then
+            echo "Merging KernelSU config..."
+            make O=out features/kernelsu.config
+          else
+            echo "⚠️ kernelsu.config not found! Ensure KernelSU is integrated."
+          fi
+
+      - name: Build kernel
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          export CC=clang
+          export LLVM=1
+          make -j$(nproc) O=out
+
+      - name: Collect kernel image
+        id: image
+        run: |
+          IMG=""
+          for f in out/arch/arm64/boot/Image.gz-dtb out/arch/arm64/boot/Image.gz out/arch/arm64/boot/Image; do
+            if [ -f "$f" ]; then
+              IMG="$f"
+              break
+            fi
+          done
+          if [ -z "$IMG" ]; then
+            echo "Kernel image not found!"
+            exit 1
+          fi
+          echo "IMAGE=$IMG" >> $GITHUB_ENV
+
+      - name: Clone AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+          cp $IMAGE AnyKernel3/Image.gz-dtb || cp $IMAGE AnyKernel3/Image || true
+          cd AnyKernel3
+          sed -i 's/is_slot_device=0/is_slot_device=1/' anykernel.sh  # adjust if A/B device
+          cd ..
+
+      - name: Pack AnyKernel3 zip
+        run: |
+          cd AnyKernel3
+          ZIPNAME="moonwake_ruby_ksu_${GITHUB_RUN_ID}.zip"
+          zip -r ../$ZIPNAME . -x ".git*" -x "README.md"
+          echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ruby-kernel-ksu
+          path: ${{ env.ZIPNAME }}
