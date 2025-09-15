@@ -1,70 +1,85 @@
-name: Build MoonWake Ruby Kernel (with KSU)
+name: Build MoonWake Ruby Kernel
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - master
-
-permissions:
-  contents: write   # required for creating releases
 
 jobs:
-  build-and-release:
+  build:
     runs-on: ubuntu-22.04
+
     env:
       WORKDIR: ${{ github.workspace }}
       OUTDIR: out
-      ZIP_PREFIX: moonwake_ruby_ksu
+      ZIP_PREFIX: moonwake_ruby
 
     steps:
-      - name: Checkout kernel source (with submodules)
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
+      - name: Checkout source
+        uses: actions/checkout@v4
 
-      - name: Setup environment (apt)
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git bc bison flex build-essential \
-            libssl-dev libncurses-dev ccache zip unzip curl wget clang
+          sudo apt-get install -y \
+            bc bison build-essential flex zip curl \
+            libncurses-dev libssl-dev ccache wget git unzip
 
-      - name: Cache ccache
+      - name: Setup ccache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-${{ hashFiles('**/Makefile') }}
-          restore-keys: |
-            ccache-${{ runner.os }}-
+          key: ccache-Linux-${{ github.sha }}
+          restore-keys: ccache-Linux-
 
-      - name: Download Google clang r530567 (optional)
+      - name: Download clang (r530567)
         run: |
           mkdir -p "${WORKDIR}/clang"
           cd "${WORKDIR}/clang"
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/r530567/clang-r530567.tar.gz -O clang.tar.gz || true
-          if [ -f clang.tar.gz ]; then
-            tar -xzf clang.tar.gz --strip-components=1
-            echo "Using prebuilt clang in ${WORKDIR}/clang"
-          else
-            echo "⚠️ prebuilt clang not found — using system clang"
-          fi
+          wget -q https://github.com/Neutron-Toolchains/clang-builds/releases/download/530567/clang-r530567.tar.gz -O clang.tar.gz
+          tar -xzf clang.tar.gz --strip-components=1
+          echo "✅ Using prebuilt clang in ${WORKDIR}/clang"
 
-      - name: Configure kernel (ruby_defconfig + merge KernelSU config if present)
+      - name: Build normal kernel
         run: |
-          set -e
-          export ARCH=arm64
-          export SUBARCH=arm64
           export PATH="${WORKDIR}/clang/bin:$PATH"
-          export CC=clang
-          export LLVM=1
-          export DEFCONFIG=ruby_defconfig
-          mkdir -p "${WORKDIR}/${OUTDIR}"
-          make O="${WORKDIR}/${OUTDIR}" ${DEFCONFIG}
-          # merge kernelsu config if present
-          if [ -f arch/arm64/configs/features/kernelsu.config ]; then
-            echo "Merging kernelsu.config into generated config..."
+          mkdir -p $OUTDIR
+          make O=$OUTDIR CC=clang ARCH=arm64 ruby_defconfig
+          make -j$(nproc) O=$OUTDIR CC=clang ARCH=arm64
+
+          # Pack into AnyKernel3
+          git clone https://github.com/osm0sis/AnyKernel3.git -b master anykernel
+          cp $OUTDIR/arch/arm64/boot/Image.gz-dtb anykernel/
+          cd anykernel
+          zip -r9 "../${ZIP_PREFIX}_normal.zip" *
+
+      - name: Clone KernelSU
+        run: |
+          cd $WORKDIR
+          git clone https://github.com/tiann/KernelSU.git --depth=1
+
+      - name: Apply KernelSU patch
+        run: |
+          cd $WORKDIR/KernelSU
+          ./patch.sh $WORKDIR
+
+      - name: Build KSU kernel
+        run: |
+          export PATH="${WORKDIR}/clang/bin:$PATH"
+          rm -rf $OUTDIR && mkdir -p $OUTDIR
+          make O=$OUTDIR CC=clang ARCH=arm64 ruby_defconfig
+          make -j$(nproc) O=$OUTDIR CC=clang ARCH=arm64
+
+          # Pack into AnyKernel3
+          git clone https://github.com/osm0sis/AnyKernel3.git -b master anykernel-ksu
+          cp $OUTDIR/arch/arm64/boot/Image.gz-dtb anykernel-ksu/
+          cd anykernel-ksu
+          zip -r9 "../${ZIP_PREFIX}_ksu.zip" *
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-builds
+          path: |
+            ${{ github.workspace }}/*.zip            echo "Merging kernelsu.config into generated config..."
             if [ -f ./scripts/kconfig/merge_config.sh ]; then
               ./scripts/kconfig/merge_config.sh "${WORKDIR}/${OUTDIR}/.config" arch/arm64/configs/features/kernelsu.config
               make O="${WORKDIR}/${OUTDIR}" olddefconfig
