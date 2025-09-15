@@ -64,7 +64,8 @@ jobs:
       - name: Build KSU kernel
         run: |
           export PATH="${WORKDIR}/clang/bin:$PATH"
-          rm -rf $OUTDIR && mkdir -p $OUTDIR
+          rm -rf $OUTDIR
+          mkdir -p $OUTDIR
           make O=$OUTDIR CC=clang ARCH=arm64 ruby_defconfig
           make -j$(nproc) O=$OUTDIR CC=clang ARCH=arm64
 
@@ -74,111 +75,9 @@ jobs:
           cd anykernel-ksu
           zip -r9 "../${ZIP_PREFIX}_ksu.zip" *
 
-      - name: Upload release artifacts
+      - name: Upload kernel zips
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-builds
+          name: KernelZips
           path: |
-            ${{ github.workspace }}/*.zip            echo "Merging kernelsu.config into generated config..."
-            if [ -f ./scripts/kconfig/merge_config.sh ]; then
-              ./scripts/kconfig/merge_config.sh "${WORKDIR}/${OUTDIR}/.config" arch/arm64/configs/features/kernelsu.config
-              make O="${WORKDIR}/${OUTDIR}" olddefconfig
-            else
-              # fallback append-and-olddefconfig
-              cat arch/arm64/configs/features/kernelsu.config >> "${WORKDIR}/${OUTDIR}/.config"
-              make O="${WORKDIR}/${OUTDIR}" olddefconfig
-            fi
-          else
-            echo "⚠️ kernelsu.config not found. Ensure KernelSU is integrated into your tree."
-          fi
-
-      - name: Build kernel
-        run: |
-          set -e
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export PATH="${WORKDIR}/clang/bin:$PATH"
-          export CC=clang
-          export LLVM=1
-          make -j$(nproc) O="${WORKDIR}/${OUTDIR}"
-
-      - name: Collect kernel image
-        id: collect-image
-        run: |
-          set -e
-          IMG=""
-          candidates=(
-            "${WORKDIR}/${OUTDIR}/arch/arm64/boot/Image.gz-dtb"
-            "${WORKDIR}/${OUTDIR}/arch/arm64/boot/Image.gz"
-            "${WORKDIR}/${OUTDIR}/arch/arm64/boot/Image"
-            "${WORKDIR}/${OUTDIR}/arch/arm64/boot/Image.lz"
-            "${WORKDIR}/${OUTDIR}/arch/arm64/boot/Image.lz-dtb"
-          )
-          for f in "${candidates[@]}"; do
-            if [ -f "$f" ]; then
-              IMG="$f"
-              break
-            fi
-          done
-          if [ -z "$IMG" ]; then
-            echo "Kernel image not found! Searched: ${candidates[*]}"
-            exit 1
-          fi
-          echo "Found kernel image: $IMG"
-          echo "IMAGE=$IMG" >> $GITHUB_ENV
-          echo "image_path=$IMG" >> $GITHUB_OUTPUT
-
-      - name: Clone AnyKernel3
-        run: |
-          set -e
-          cd "${WORKDIR}"
-          rm -rf AnyKernel3
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
-          chmod -R a+rX AnyKernel3
-
-      - name: Copy kernel image into AnyKernel3
-        run: |
-          set -e
-          cd "${WORKDIR}/AnyKernel3"
-          # copy using the found IMAGE env var
-          if cp "${IMAGE}" ./Image.gz-dtb 2>/dev/null; then
-            echo "Copied kernel as Image.gz-dtb"
-          elif cp "${IMAGE}" ./Image 2>/dev/null; then
-            echo "Copied kernel as Image"
-          else
-            echo "Could not copy kernel image to AnyKernel3 directory"
-            ls -l "${IMAGE}" || true
-            exit 1
-          fi
-          # adjust anykernel.sh for slot devices if present
-          if grep -q "is_slot_device=0" anykernel.sh; then
-            sed -i 's/is_slot_device=0/is_slot_device=1/' anykernel.sh || true
-          fi
-
-      - name: Pack AnyKernel3 zip
-        id: pack-zip
-        run: |
-          set -e
-          cd "${WORKDIR}/AnyKernel3"
-          ZIPNAME="${ZIP_PREFIX}_${{ github.run_id }}.zip"
-          zip -r "${WORKDIR}/${ZIPNAME}" . -x ".git*" -x "README.md"
-          echo "ZIPNAME=${ZIPNAME}" >> $GITHUB_ENV
-          echo "zip_path=${WORKDIR}/${ZIPNAME}" >> $GITHUB_OUTPUT
-          ls -lh "${WORKDIR}/${ZIPNAME}"
-
-      - name: Upload artifact (zip)
-        uses: actions/upload-artifact@v4
-        with:
-          name: ruby-kernel-ksu
-          path: ${{ env.ZIPNAME }}
-
-      - name: Create GitHub release (attach ZIP)
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: moonwake-${{ github.run_id }}
-          name: MoonWake Ruby Kernel KSU - run ${{ github.run_id }}
-          files: ${{ env.ZIPNAME }}
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            ${{ github.workspace }}/*.zip
