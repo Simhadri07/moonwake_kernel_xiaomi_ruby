@@ -152,7 +152,7 @@ jobs:
           ls -lh "${WORKDIR}/${ZIPNAME}"
 
       - name: Upload artifact (zip)
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ruby-kernel-ksu
           path: ${{ env.ZIPNAME }}
