@@ -1,0 +1,184 @@
+name: Build MoonWake Ruby Kernel
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    env:
+      WORKDIR: ${{ github.workspace }}
+      OUTDIR: out
+      ZIP_PREFIX: moonwake_ruby
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential flex zip curl \
+            libncurses-dev libssl-dev ccache wget git unzip jq
+
+      # ------------------- CACHES -------------------
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        id: ccache-cache
+        with:
+          path: ~/.ccache
+          key: ccache-Linux-${{ github.sha }}
+          restore-keys: ccache-Linux-
+
+      - name: Cache Clang
+        uses: actions/cache@v4
+        id: clang-cache
+        with:
+          path: clang
+          key: clang-Linux-${{ github.sha }}
+          restore-keys: clang-Linux-
+
+      - name: Cache AnyKernel3
+        uses: actions/cache@v4
+        id: anykernel-cache
+        with:
+          path: anykernel
+          key: anykernel-Linux-${{ github.sha }}
+          restore-keys: anykernel-Linux-
+
+      - name: Cache KernelSU patch
+        uses: actions/cache@v4
+        id: ksu-cache
+        with:
+          path: KernelSU
+          key: ksu-Linux-${{ github.sha }}
+          restore-keys: ksu-Linux-
+
+      - name: Cache Kernel source
+        uses: actions/cache@v4
+        id: kernel-cache
+        with:
+          path: ${{ github.workspace }}
+          key: kernel-Linux-${{ github.sha }}
+          restore-keys: kernel-Linux-
+
+      # ------------------- CLANG -------------------
+
+      - name: Download clang if not cached
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "${WORKDIR}/clang"
+          cd "${WORKDIR}/clang"
+          URLS=(
+            "https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/clang-r530567/clang-r530567.tar.gz"
+            "https://github.com/Neutron-Toolchains/clang-builds/releases/download/530567/clang-r530567.tar.gz"
+          )
+          SUCCESS=0
+          for url in "${URLS[@]}"; do
+            echo "Trying $url"
+            for i in {1..3}; do
+              wget -q --show-progress "$url" -O clang.tar.gz && SUCCESS=1 && break
+              echo "Retry $i failed, waiting 5s..."
+              sleep 5
+            done
+            [ $SUCCESS -eq 1 ] && break
+          done
+          if [ $SUCCESS -eq 0 ]; then
+            echo "Trying latest release..."
+            LATEST_VERSION=$(curl -s https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest | jq -r .tag_name)
+            LATEST_URL="https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/${LATEST_VERSION}/${LATEST_VERSION}.tar.gz"
+            for i in {1..3}; do
+              wget -q --show-progress "$LATEST_URL" -O clang.tar.gz && SUCCESS=1 && break
+              echo "Retry $i for latest release failed, waiting 5s..."
+              sleep 5
+            done
+          fi
+          if [ $SUCCESS -eq 0 ] || [ ! -s clang.tar.gz ]; then
+            echo "❌ All clang download attempts failed. Exiting..."
+            ls -la
+            exit 1
+          fi
+          tar -xzf clang.tar.gz --strip-components=1
+          echo "✅ Using clang in ${WORKDIR}/clang"
+
+      # ------------------- ANYKERNEL3 -------------------
+
+      - name: Clone AnyKernel3 if not cached
+        if: steps.anykernel-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git -b master anykernel || exit 1
+
+      # ------------------- NORMAL KERNEL BUILD -------------------
+
+      - name: Build normal kernel (robust)
+        run: |
+          export PATH="${WORKDIR}/clang/bin:$PATH"
+          mkdir -p $OUTDIR
+          for i in {1..2}; do
+            make O=$OUTDIR CC=clang ARCH=arm64 ruby_defconfig && \
+            make -j$(nproc) O=$OUTDIR CC=clang ARCH=arm64 && break || echo "Retry $i failed"
+          done
+          IMAGE=""
+          for f in "$OUTDIR/arch/arm64/boot/Image.gz-dtb" "$OUTDIR/arch/arm64/boot/Image.gz" "$OUTDIR/arch/arm64/boot/Image"; do
+            if [ -f "$f" ]; then IMAGE=$f; break; fi
+          done
+          if [ -z "$IMAGE" ]; then
+            echo "❌ Kernel image not found!"
+            ls -l $OUTDIR/arch/arm64/boot/
+            exit 1
+          fi
+          cp "$IMAGE" anykernel/
+          cd anykernel
+          zip -r9 "../${ZIP_PREFIX}_normal.zip" *
+          cd ..
+
+      # ------------------- KERNELSU -------------------
+
+      - name: Clone KernelSU if not cached
+        if: steps.ksu-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/tiann/KernelSU.git --depth=1 || exit 1
+
+      - name: Apply KernelSU patch
+        run: |
+          cd $WORKDIR/KernelSU
+          ./patch.sh $WORKDIR || exit 1
+
+      - name: Build KSU-next kernel (robust)
+        run: |
+          export PATH="${WORKDIR}/clang/bin:$PATH"
+          rm -rf $OUTDIR
+          mkdir -p $OUTDIR
+          for i in {1..2}; do
+            make O=$OUTDIR CC=clang ARCH=arm64 ruby_defconfig && \
+            make -j$(nproc) O=$OUTDIR CC=clang ARCH=arm64 && break || echo "Retry $i failed"
+          done
+          IMAGE=""
+          for f in "$OUTDIR/arch/arm64/boot/Image.gz-dtb" "$OUTDIR/arch/arm64/boot/Image.gz" "$OUTDIR/arch/arm64/boot/Image"; do
+            if [ -f "$f" ]; then IMAGE=$f; break; fi
+          done
+          if [ -z "$IMAGE" ]; then
+            echo "❌ KSU kernel image not found!"
+            ls -l $OUTDIR/arch/arm64/boot/
+            exit 1
+          fi
+          mkdir -p anykernel/ksu
+          cp "$IMAGE" anykernel/ksu/
+          cd anykernel
+          zip -r9 "../${ZIP_PREFIX}_ksu.zip" ksu
+
+      # ------------------- UPLOAD ARTIFACTS -------------------
+
+      - name: Upload kernel zips
+        uses: actions/upload-artifact@v4
+        with:
+          name: KernelZips
+          path: |
+            ${{ github.workspace }}/*.zip
