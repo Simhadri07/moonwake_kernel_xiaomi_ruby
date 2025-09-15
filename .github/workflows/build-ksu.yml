@@ -3,159 +3,167 @@ name: Build MoonWake Ruby Kernel (with KSU)
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write   # required for creating releases
 
 jobs:
-  build:
+  build-and-release:
     runs-on: ubuntu-22.04
+    env:
+      WORKDIR: ${{ github.workspace }}
+      OUTDIR: out
+      ZIP_PREFIX: moonwake_ruby_ksu
 
     steps:
-      - name: Checkout kernel source
+      - name: Checkout kernel source (with submodules)
         uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
 
-      - name: Setup environment
+      - name: Setup environment (apt)
         run: |
           sudo apt-get update
           sudo apt-get install -y git bc bison flex build-essential \
-            libssl-dev libncurses-dev ccache zip unzip curl wget
+            libssl-dev libncurses-dev ccache zip unzip curl wget clang
 
-      - name: Download Google clang r530567
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('**/Makefile') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
+      - name: Download Google clang r530567 (optional)
         run: |
-          mkdir -p $GITHUB_WORKSPACE/clang
-          cd $GITHUB_WORKSPACE/clang
-          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/r530567/clang-r530567.tar.gz -O clang.tar.gz || true
+          mkdir -p "${WORKDIR}/clang"
+          cd "${WORKDIR}/clang"
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/r530567/clang-r530567.tar.gz -O clang.tar.gz || true
           if [ -f clang.tar.gz ]; then
-            tar -xzf clang.tar.gz
+            tar -xzf clang.tar.gz --strip-components=1
+            echo "Using prebuilt clang in ${WORKDIR}/clang"
           else
-            echo "⚠️ Could not fetch prebuilt clang. Falling back to system clang."
-            sudo apt-get install -y clang
+            echo "⚠️ prebuilt clang not found — using system clang"
           fi
 
-      - name: Configure kernel (ruby_defconfig + kernelsu)
+      - name: Configure kernel (ruby_defconfig + merge KernelSU config if present)
         run: |
+          set -e
           export ARCH=arm64
           export SUBARCH=arm64
-          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          export PATH="${WORKDIR}/clang/bin:$PATH"
           export CC=clang
           export LLVM=1
           export DEFCONFIG=ruby_defconfig
-          mkdir -p out
-          make O=out $DEFCONFIG
+          mkdir -p "${WORKDIR}/${OUTDIR}"
+          make O="${WORKDIR}/${OUTDIR}" ${DEFCONFIG}
+          # merge kernelsu config if present
           if [ -f arch/arm64/configs/features/kernelsu.config ]; then
-            echo "Merging KernelSU config..."
-            make O=out features/kernelsu.config
+            echo "Merging kernelsu.config into generated config..."
+            if [ -f ./scripts/kconfig/merge_config.sh ]; then
+              ./scripts/kconfig/merge_config.sh "${WORKDIR}/${OUTDIR}/.config" arch/arm64/configs/features/kernelsu.config
+              make O="${WORKDIR}/${OUTDIR}" olddefconfig
+            else
+              # fallback append-and-olddefconfig
+              cat arch/arm64/configs/features/kernelsu.config >> "${WORKDIR}/${OUTDIR}/.config"
+              make O="${WORKDIR}/${OUTDIR}" olddefconfig
+            fi
           else
-            echo "⚠️ kernelsu.config not found! Ensure KernelSU is integrated."
+            echo "⚠️ kernelsu.config not found. Ensure KernelSU is integrated into your tree."
           fi
 
       - name: Build kernel
         run: |
+          set -e
           export ARCH=arm64
           export SUBARCH=arm64
-          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          export PATH="${WORKDIR}/clang/bin:$PATH"
           export CC=clang
           export LLVM=1
-          make -j$(nproc) O=out
+          make -j$(nproc) O="${WORKDIR}/${OUTDIR}"
 
       - name: Collect kernel image
-        id: image
+        id: collect-image
         run: |
+          set -e
           IMG=""
-          for f in out/arch/arm64/boot/Image.gz-dtb out/arch/arm64/boot/Image.gz out/arch/arm64/boot/Image; do
+          candidates=(
+            "${WORKDIR}/${OUTDIR}/arch/arm64/boot/Image.gz-dtb"
+            "${WORKDIR}/${OUTDIR}/arch/arm64/boot/Image.gz"
+            "${WORKDIR}/${OUTDIR}/arch/arm64/boot/Image"
+            "${WORKDIR}/${OUTDIR}/arch/arm64/boot/Image.lz"
+            "${WORKDIR}/${OUTDIR}/arch/arm64/boot/Image.lz-dtb"
+          )
+          for f in "${candidates[@]}"; do
             if [ -f "$f" ]; then
               IMG="$f"
               break
             fi
           done
           if [ -z "$IMG" ]; then
-            echo "Kernel image not found!"
+            echo "Kernel image not found! Searched: ${candidates[*]}"
             exit 1
           fi
+          echo "Found kernel image: $IMG"
           echo "IMAGE=$IMG" >> $GITHUB_ENV
+          echo "image_path=$IMG" >> $GITHUB_OUTPUT
 
       - name: Clone AnyKernel3
         run: |
+          set -e
+          cd "${WORKDIR}"
+          rm -rf AnyKernel3
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
-          cp $IMAGE AnyKernel3/Image.gz-dtb || cp $IMAGE AnyKernel3/Image || true
-          cd AnyKernel3
-          sed -i 's/is_slot_device=0/is_slot_device=1/' anykernel.sh  # adjust if A/B device
-          cd ..
+          chmod -R a+rX AnyKernel3
+
+      - name: Copy kernel image into AnyKernel3
+        run: |
+          set -e
+          cd "${WORKDIR}/AnyKernel3"
+          # copy using the found IMAGE env var
+          if cp "${IMAGE}" ./Image.gz-dtb 2>/dev/null; then
+            echo "Copied kernel as Image.gz-dtb"
+          elif cp "${IMAGE}" ./Image 2>/dev/null; then
+            echo "Copied kernel as Image"
+          else
+            echo "Could not copy kernel image to AnyKernel3 directory"
+            ls -l "${IMAGE}" || true
+            exit 1
+          fi
+          # adjust anykernel.sh for slot devices if present
+          if grep -q "is_slot_device=0" anykernel.sh; then
+            sed -i 's/is_slot_device=0/is_slot_device=1/' anykernel.sh || true
+          fi
 
       - name: Pack AnyKernel3 zip
+        id: pack-zip
         run: |
-          cd AnyKernel3
-          ZIPNAME="moonwake_ruby_ksu_${GITHUB_RUN_ID}.zip"
-          zip -r ../$ZIPNAME . -x ".git*" -x "README.md"
-          echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
+          set -e
+          cd "${WORKDIR}/AnyKernel3"
+          ZIPNAME="${ZIP_PREFIX}_${{ github.run_id }}.zip"
+          zip -r "${WORKDIR}/${ZIPNAME}" . -x ".git*" -x "README.md"
+          echo "ZIPNAME=${ZIPNAME}" >> $GITHUB_ENV
+          echo "zip_path=${WORKDIR}/${ZIPNAME}" >> $GITHUB_OUTPUT
+          ls -lh "${WORKDIR}/${ZIPNAME}"
 
-      - name: Upload artifact
+      - name: Upload artifact (zip)
         uses: actions/upload-artifact@v3
         with:
           name: ruby-kernel-ksu
           path: ${{ env.ZIPNAME }}
 
-      - name: Upload release with tag
+      - name: Create GitHub release (attach ZIP)
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: tsg
-          name: MoonWake Ruby Kernel KSU
+          tag_name: moonwake-${{ github.run_id }}
+          name: MoonWake Ruby Kernel KSU - run ${{ github.run_id }}
           files: ${{ env.ZIPNAME }}
           draft: false
           prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}          export CC=clang
-          export LLVM=1
-          export DEFCONFIG=ruby_defconfig
-          mkdir -p out
-          make O=out $DEFCONFIG
-          if [ -f arch/arm64/configs/features/kernelsu.config ]; then
-            echo "Merging KernelSU config..."
-            make O=out features/kernelsu.config
-          else
-            echo "⚠️ kernelsu.config not found! Ensure KernelSU is integrated."
-          fi
-
-      - name: Build kernel
-        run: |
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
-          export CC=clang
-          export LLVM=1
-          make -j$(nproc) O=out
-
-      - name: Collect kernel image
-        id: image
-        run: |
-          IMG=""
-          for f in out/arch/arm64/boot/Image.gz-dtb out/arch/arm64/boot/Image.gz out/arch/arm64/boot/Image; do
-            if [ -f "$f" ]; then
-              IMG="$f"
-              break
-            fi
-          done
-          if [ -z "$IMG" ]; then
-            echo "Kernel image not found!"
-            exit 1
-          fi
-          echo "IMAGE=$IMG" >> $GITHUB_ENV
-
-      - name: Clone AnyKernel3
-        run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
-          cp $IMAGE AnyKernel3/Image.gz-dtb || cp $IMAGE AnyKernel3/Image || true
-          cd AnyKernel3
-          sed -i 's/is_slot_device=0/is_slot_device=1/' anykernel.sh  # adjust if A/B device
-          cd ..
-
-      - name: Pack AnyKernel3 zip
-        run: |
-          cd AnyKernel3
-          ZIPNAME="moonwake_ruby_ksu_${GITHUB_RUN_ID}.zip"
-          zip -r ../$ZIPNAME . -x ".git*" -x "README.md"
-          echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: ruby-kernel-ksu
-          path: ${{ env.ZIPNAME }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
